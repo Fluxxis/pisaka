@@ -1,5 +1,6 @@
 
 import asyncio
+import json
 import os
 import random
 import re
@@ -21,6 +22,18 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 FONTS_DIR = BASE_DIR / "fonts"
 TEMPLATE_PATH = ASSETS_DIR / "template.png"
+
+CONFIG_JSON_PATH = BASE_DIR / "config.json"
+
+def load_token_from_json(path: Path) -> str | None:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        token = (data.get("BOT_TOKEN") or data.get("token") or "").strip()
+        return token or None
+    except Exception:
+        return None
 
 @dataclass
 class Coords:
@@ -200,9 +213,9 @@ async def got_wallet(m: Message, state: FSMContext):
     await state.clear()
 
 async def main():
-    token = os.getenv("7996925136:AAEUIqyOK6_FmukWQOfV22EqbT4l3ZwqB3Q")
+    token = load_token_from_json(CONFIG_JSON_PATH) or os.getenv("BOT_TOKEN")
     if not token:
-        raise RuntimeError("Не найден BOT_TOKEN в переменных окружения")
+        raise RuntimeError("Не найден BOT_TOKEN: добавь его в config.json (BOT_TOKEN) или в переменные окружения")
 
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
