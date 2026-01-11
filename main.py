@@ -398,6 +398,8 @@ async def main():
         raise RuntimeError("Не найден BOT_TOKEN: добавь его в config.json (BOT_TOKEN) или в переменные окружения")
 
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # на всякий случай убираем webhook, если он был выставлен
+    await bot.delete_webhook(drop_pending_updates=False)
     dp = Dispatcher()
     dp.include_router(router)
     await dp.start_polling(bot)
