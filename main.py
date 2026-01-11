@@ -118,6 +118,44 @@ class Form(StatesGroup):
 
 router = Router()
 
+@router.message(F.text == "/debug")
+async def debug(m: Message):
+    """
+    Отправляет шаблон с рамками блоков и подписями координат.
+    Помогает точно настроить размещение текста.
+    """
+    if not TEMPLATE_PATH.exists():
+        await m.answer("Не найден шаблон assets/template.png")
+        return
+
+    img = Image.open(TEMPLATE_PATH).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+
+    # Подписи используем простой встроенный шрифт (чтобы /debug работал даже без ttf)
+    label_font = ImageFont.load_default()
+
+    def box(name: str, c: Coords, color=(255, 0, 0, 255)):
+        # рамка
+        draw.rectangle([c.x, c.y, c.x + c.w, c.y + c.h], outline=color, width=3)
+        # подпись
+        label = f"{name}: x={c.x} y={c.y} w={c.w} h={c.h}"
+        # фон под текстом
+        tw, th = draw.textbbox((0,0), label, font=label_font)[2:]
+        pad = 3
+        bx0, by0 = c.x, max(0, c.y - th - 2*pad)
+        draw.rectangle([bx0, by0, bx0 + tw + 2*pad, by0 + th + 2*pad], fill=(0,0,0,170))
+        draw.text((bx0 + pad, by0 + pad), label, font=label_font, fill=(255,255,255,255))
+
+    box("TIME_BOX", TIME_BOX, (255, 80, 80, 255))
+    box("BATT_BOX", BATT_BOX, (255, 180, 80, 255))
+    box("OPID_BOX", OPID_BOX, (80, 200, 255, 255))
+    box("AMOUNT_LINE", AMOUNT_LINE, (150, 255, 150, 255))
+    box("WALLET_BOX", WALLET_BOX, (200, 120, 255, 255))
+
+    out = BASE_DIR / "debug_overlay.png"
+    img.convert("RGB").save(out, "PNG", optimize=True, compress_level=9)
+    await m.answer_document(FSInputFile(out), caption="Debug overlay ✅")
+
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
