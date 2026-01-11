@@ -12,7 +12,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -110,6 +110,10 @@ def draw_centered(draw: ImageDraw.ImageDraw, box: Coords, text: str, font, fill)
 def draw_left(draw: ImageDraw.ImageDraw, box: Coords, text: str, font, fill):
     draw.text((box.x, box.y), text, font=font, fill=fill)
 
+class Debug(StatesGroup):
+    choosing = State()
+    adjusting = State()
+
 class Form(StatesGroup):
     battery = State()
     time = State()
@@ -118,43 +122,181 @@ class Form(StatesGroup):
 
 router = Router()
 
-@router.message(F.text == "/debug")
-async def debug(m: Message):
-    """
-    Отправляет шаблон с рамками блоков и подписями координат.
-    Помогает точно настроить размещение текста.
-    """
-    if not TEMPLATE_PATH.exists():
-        await m.answer("Не найден шаблон assets/template.png")
-        return
+def coords_text() -> str:
+    lines = ["<b>Текущие координаты:</b>"]
+    for k in COORD_NAMES_ORDER:
+        c = COORDS[k]
+        lines.append(f"• <b>{COORD_LABELS[k]}</b> ({k}): x={c['x']} y={c['y']} w={c['w']} h={c['h']}")
+    lines.append("\nВыбери, что настраивать:")
+    return "\n".join(lines)
 
+def debug_keyboard(selected: str | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    # выбор блока
+    row = []
+    for k in COORD_NAMES_ORDER:
+        label = COORD_LABELS[k]
+        if selected == k:
+            label = f"✅ {label}"
+        row.append(InlineKeyboardButton(text=label, callback_data=f"dbg:sel:{k}"))
+    # split into 2 rows for readability
+    rows.append(row[:3])
+    rows.append(row[3:])
+
+    rows.append([
+    InlineKeyboardButton(text="✅ Применить (сохранить)", callback_data="dbg:apply"),
+    InlineKeyboardButton(text="⬇️ Скачать значения (config.json)", callback_data="dbg:download")
+])
+    rows.append([InlineKeyboardButton(text="🎯 Показать overlay", callback_data="dbg:overlay")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def adjust_keyboard(k: str) -> InlineKeyboardMarkup:
+    # controls: x/y/w/h +/- 1/5/10
+    steps = [1, 5, 10]
+    rows = [[InlineKeyboardButton(text="⬅️ x-", callback_data=f"dbg:adj:{k}:x:-{s}"),
+             InlineKeyboardButton(text=f"{s}px", callback_data="noop"),
+             InlineKeyboardButton(text="x+ ➡️", callback_data=f"dbg:adj:{k}:x:+{s}")]
+            for s in steps]
+    rows += [[InlineKeyboardButton(text="⬆️ y-", callback_data=f"dbg:adj:{k}:y:-{s}"),
+              InlineKeyboardButton(text=f"{s}px", callback_data="noop"),
+              InlineKeyboardButton(text="y+ ⬇️", callback_data=f"dbg:adj:{k}:y:+{s}")]
+             for s in steps]
+    rows.append([
+        InlineKeyboardButton(text="➖ w", callback_data=f"dbg:adj:{k}:w:-10"),
+        InlineKeyboardButton(text="➕ w", callback_data=f"dbg:adj:{k}:w:+10"),
+        InlineKeyboardButton(text="➖ h", callback_data=f"dbg:adj:{k}:h:-10"),
+        InlineKeyboardButton(text="➕ h", callback_data=f"dbg:adj:{k}:h:+10"),
+    ])
+    rows.append([
+    InlineKeyboardButton(text="✅ Применить (сохранить)", callback_data="dbg:apply"),
+    InlineKeyboardButton(text="⬅️ Назад", callback_data="dbg:back")
+])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def render_debug_overlay() -> Path:
     img = Image.open(TEMPLATE_PATH).convert("RGBA")
     draw = ImageDraw.Draw(img)
-
-    # Подписи используем простой встроенный шрифт (чтобы /debug работал даже без ttf)
     label_font = ImageFont.load_default()
 
     def box(name: str, c: Coords, color=(255, 0, 0, 255)):
-        # рамка
         draw.rectangle([c.x, c.y, c.x + c.w, c.y + c.h], outline=color, width=3)
-        # подпись
-        label = f"{name}: x={c.x} y={c.y} w={c.w} h={c.h}"
-        # фон под текстом
-        tw, th = draw.textbbox((0,0), label, font=label_font)[2:]
+        label = f"{name}  x={c.x} y={c.y} w={c.w} h={c.h}"
+        tb = draw.textbbox((0,0), label, font=label_font)
+        tw, th = tb[2]-tb[0], tb[3]-tb[1]
         pad = 3
         bx0, by0 = c.x, max(0, c.y - th - 2*pad)
         draw.rectangle([bx0, by0, bx0 + tw + 2*pad, by0 + th + 2*pad], fill=(0,0,0,170))
         draw.text((bx0 + pad, by0 + pad), label, font=label_font, fill=(255,255,255,255))
 
-    box("TIME_BOX", TIME_BOX, (255, 80, 80, 255))
-    box("BATT_BOX", BATT_BOX, (255, 180, 80, 255))
-    box("OPID_BOX", OPID_BOX, (80, 200, 255, 255))
-    box("AMOUNT_LINE", AMOUNT_LINE, (150, 255, 150, 255))
-    box("WALLET_BOX", WALLET_BOX, (200, 120, 255, 255))
+    colors = {
+        "TIME_BOX": (255, 80, 80, 255),
+        "BATT_BOX": (255, 180, 80, 255),
+        "OPID_BOX": (80, 200, 255, 255),
+        "AMOUNT_LINE": (150, 255, 150, 255),
+        "WALLET_BOX": (200, 120, 255, 255),
+    }
+    for k in COORD_NAMES_ORDER:
+        box(k, get_box(k), colors.get(k, (255,0,0,255)))
 
     out = BASE_DIR / "debug_overlay.png"
     img.convert("RGB").save(out, "PNG", optimize=True, compress_level=9)
-    await m.answer_document(FSInputFile(out), caption="Debug overlay ✅")
+    return out
+
+@router.message(F.text == "/debug")
+async def debug(m: Message, state: FSMContext):
+    await state.set_state(Debug.choosing)
+    await state.update_data(debug_selected=None)
+    await m.answer(coords_text(), reply_markup=debug_keyboard(None))
+
+@router.callback_query(F.data == "noop")
+async def noop_cb(cq: CallbackQuery):
+    await cq.answer()
+
+@router.callback_query(F.data.startswith("dbg:"), Debug.choosing)
+async def debug_choose_cb(cq: CallbackQuery, state: FSMContext):
+    parts = cq.data.split(":")
+    action = parts[1]
+
+    if action == "sel":
+        k = parts[2]
+        await state.update_data(debug_selected=k)
+        await state.set_state(Debug.adjusting)
+        await cq.message.edit_text(
+            f"<b>Настройка:</b> {COORD_LABELS[k]} ({k})\n"
+            f"x={COORDS[k]['x']} y={COORDS[k]['y']} w={COORDS[k]['w']} h={COORDS[k]['h']}\n\n"
+            "Жми кнопки, чтобы двигать/менять размер.",
+            reply_markup=adjust_keyboard(k)
+        )
+        await cq.answer()
+        return
+
+    if action == "apply":
+        save_coords_to_json(CONFIG_JSON_PATH, COORDS)
+        refresh_boxes()
+        await cq.answer("Сохранено ✅", show_alert=False)
+        # обновим текст, чтобы было видно, что актуально
+        await cq.message.edit_text(coords_text(), reply_markup=debug_keyboard(None))
+        return
+
+    if action == "download":
+        # сохраняем на диск и отправляем
+        save_coords_to_json(CONFIG_JSON_PATH, COORDS)
+        await cq.answer("Готовлю файл…")
+        await cq.message.answer_document(FSInputFile(CONFIG_JSON_PATH), caption="Вот обновлённый config.json ✅")
+        return
+
+    if action == "overlay":
+        if not TEMPLATE_PATH.exists():
+            await cq.answer("Не найден template.png", show_alert=True)
+            return
+        p = render_debug_overlay()
+        await cq.answer("Готово")
+        await cq.message.answer_document(FSInputFile(p), caption="Overlay ✅")
+        return
+
+    await cq.answer()
+
+@router.callback_query(F.data.startswith("dbg:"), Debug.adjusting)
+async def debug_adjust_cb(cq: CallbackQuery, state: FSMContext):
+    parts = cq.data.split(":")
+    action = parts[1]
+    if action == "apply":
+        save_coords_to_json(CONFIG_JSON_PATH, COORDS)
+        refresh_boxes()
+        await cq.answer("Сохранено ✅")
+        return
+
+    if action == "back":
+        await state.set_state(Debug.choosing)
+        await state.update_data(debug_selected=None)
+        await cq.message.edit_text(coords_text(), reply_markup=debug_keyboard(None))
+        await cq.answer()
+        return
+
+    if action == "adj":
+        k, field, delta_s = parts[2], parts[3], parts[4]
+        delta = int(delta_s.replace("+",""))
+        # apply
+        COORDS[k][field] = int(COORDS[k][field]) + delta
+        # clamp
+        if field in ("w", "h"):
+            COORDS[k][field] = max(1, COORDS[k][field])
+        else:
+            COORDS[k][field] = max(0, COORDS[k][field])
+        refresh_boxes()
+        # update message
+        await cq.message.edit_text(
+            f"<b>Настройка:</b> {COORD_LABELS[k]} ({k})\n"
+            f"x={COORDS[k]['x']} y={COORDS[k]['y']} w={COORDS[k]['w']} h={COORDS[k]['h']}\n\n"
+            "Жми кнопки, чтобы двигать/менять размер.\n"
+            "Когда готово — нажми «⬅️ Назад», затем «⬇️ Скачать значения».",
+            reply_markup=adjust_keyboard(k)
+        )
+        await cq.answer()
+        return
+
+    await cq.answer()
+
 
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
@@ -223,21 +365,21 @@ async def got_wallet(m: Message, state: FSMContext):
     mono_font   = load_font(FONTS_DIR / "mono.ttf",   24)
 
     # time + battery (bold)
-    draw_left(draw, TIME_BOX, t, bold_font, (240,240,245,255))
+    draw_left(draw, get_box("TIME_BOX"), t, bold_font, (240,240,245,255))
     # battery centered inside box
-    draw_centered(draw, BATT_BOX, str(batt), bold_font, (240,240,245,255))
+    draw_centered(draw, get_box("BATT_BOX"), str(batt), bold_font, (240,240,245,255))
 
     # op id (simple, blue)
-    draw_centered(draw, OPID_BOX, f"#{op_id}", simple_font, (80,160,255,255))
+    draw_centered(draw, get_box("OPID_BOX"), f"#{op_id}", simple_font, (80,160,255,255))
 
     # amount line: рисуем ОДНОЙ строкой, чтобы не было разрыва между суммой и "TON ..."
     amount_line = f"{amt} TON на кошелёк:"
-    draw_left(draw, AMOUNT_LINE, amount_line, simple_font, (150,150,155,255))
+    draw_left(draw, get_box("AMOUNT_LINE"), amount_line, simple_font, (150,150,155,255))
 
     # wallet (mono, wrap)
     wallet_wrapped = wrap_mono(wallet, max_chars=34)
     draw.multiline_text(
-        (WALLET_BOX.x, WALLET_BOX.y),
+        (get_box("WALLET_BOX").x, get_box("WALLET_BOX").y),
         wallet_wrapped,
         font=mono_font,
         fill=(240,240,245,255),
